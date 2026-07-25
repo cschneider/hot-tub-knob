@@ -4,6 +4,12 @@ ESPHome firmware for a [Waveshare ESP32-S3-Knob-Touch-LCD-1.8](https://www.waves
 (1.8" round knob display, capacitive touch, CNC metal case) that shows and
 controls a hot tub heat pump exposed in Home Assistant as a `climate` entity.
 
+![UI mockup](assets/ui-mockup.png)
+
+*Mockup of the main screen layout (not a photo of the physical device) —
+gauge arc for current temp, target setpoint, HVAC action, mode, and the
+dedicated water temperature sensor reading.*
+
 ## What it does
 
 - Displays the current water temperature (from a dedicated HA sensor) and the
