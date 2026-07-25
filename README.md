@@ -202,3 +202,7 @@ one — it's easy to toggle a different device's entry by mistake.
   script, reflash, and watch `esphome logs`. This is how the permission
   issue above was actually diagnosed — the ESP side logs confirmed correct
   values were being sent well before we found the HA-side rejection.
+
+## License
+
+[MIT-0](LICENSE) — do whatever you want with this, no attribution required.
