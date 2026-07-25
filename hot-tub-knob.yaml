@@ -1,0 +1,433 @@
+substitutions:
+  name: "hot-tub-knob"
+  friendly_name: "Hot Tub Knob"
+  # Home Assistant climate entity for the heat pump
+  climate_entity: "climate.hot_tub_heat_pump"
+  # Dedicated physical water temperature sensor
+  water_temp_entity: "sensor.hottub_temp"
+  # How long the display stays lit after last interaction
+  screensaver: 30s
+  # Setpoint range the knob is allowed to dial, in actual degrees C
+  setpoint_min: "26"
+  setpoint_max: "40"
+  # Same range in half-degree units (x2) - the rotary encoder only counts
+  # whole integers, so each detent = 1 unit = 0.5°C
+  setpoint_min_units: "52"
+  setpoint_max_units: "80"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  on_boot:
+    priority: -100
+    then:
+      - delay: 2s
+      - light.turn_on:
+          id: back_light
+          brightness: 50%
+      - script.execute: screentime
+  platformio_options:
+    board_build.flash_mode: dio
+    board_build.f_flash: 80000000L
+    board_build.f_cpu: 240000000L
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# Custom display driver + rotary encoder component for this exact board.
+# (mipi_spi is now built into ESPHome core, no external PR needed anymore.)
+external_components:
+  - source:
+      type: git
+      url: https://github.com/KrX3D/WaveShare-Knob-Esp32S3
+      ref: main
+    refresh: always
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback Hotspot"
+    password: !secret ap_password
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# ---------------------------------------------------------------------------
+# Display (ST77916 via mipi_spi) + touch (CST816) + backlight
+# ---------------------------------------------------------------------------
+spi:
+  id: display_qspi
+  type: quad
+  clk_pin: 13
+  data_pins: [15, 16, 17, 18]
+
+i2c:
+  id: ic_bus
+  sda: 11
+  scl: 12
+  scan: true
+
+display:
+  - platform: mipi_spi
+    id: main_display
+    model: JC3636W518V2
+    data_rate: 80MHz
+    color_order: rgb
+    rotation: 0
+    cs_pin: 14
+    reset_pin: 21
+    invert_colors: true
+    auto_clear_enabled: false
+    update_interval: never
+    dimensions:
+      height: 360
+      width: 360
+
+touchscreen:
+  - platform: cst816
+    id: my_touchscreen
+    display: main_display
+    interrupt_pin: GPIO9
+    reset_pin: GPIO10
+    transform:
+      mirror_x: false
+      mirror_y: false
+      swap_xy: false
+    on_touch:
+      then:
+        - script.execute: screentime
+        - script.execute: toggle_heatpump
+
+output:
+  - platform: ledc
+    pin: GPIO47
+    id: backlight_pwm
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Display Backlight"
+    icon: "mdi:television"
+    entity_category: config
+    id: back_light
+    restore_mode: ALWAYS_ON
+    default_transition_length: 30ms
+    initial_state:
+      brightness: 50%
+    on_turn_off:
+      then:
+        - lvgl.pause:
+            show_snow: true
+    on_turn_on:
+      then:
+        - lvgl.resume:
+
+# ---------------------------------------------------------------------------
+# Rotary encoder (the physical knob) -> adjusts the setpoint
+# ---------------------------------------------------------------------------
+globals:
+  # Pending setpoint in half-degree units (actual °C = this / 2.0)
+  - id: pending_setpoint_units
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: setpoint_synced
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: is_mode_on
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Target temperature reported by HA, in half-degree units (see above)
+  - id: ha_target_units
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+sensor:
+  - platform: rotary_encoder_custom
+    name: "Knob"
+    id: rotary_counter
+    pin_a: 8
+    pin_b: 7
+    # Counts in half-degree units - each detent = 0.5°C
+    min_value: ${setpoint_min_units}
+    max_value: ${setpoint_max_units}
+    restore_mode: RESTORE_DEFAULT_ZERO
+    on_value:
+      then:
+        - script.execute: screentime
+        - globals.set:
+            id: pending_setpoint_units
+            value: !lambda 'return (int)x;'
+        - lvgl.label.update:
+            id: lbl_target
+            text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Target: %.1f°C", x / 2.0f); return std::string(b);'
+        - script.execute: commit_setpoint
+
+  # Current water temperature reported by the heat pump's climate entity
+  - platform: homeassistant
+    id: current_temp
+    entity_id: ${climate_entity}
+    attribute: current_temperature
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: lbl_current_temp
+            text: !lambda 'char b[16]; snprintf(b, sizeof(b), "%.1f°C", x); return std::string(b);'
+        - lvgl.arc.update:
+            id: temp_arc
+            value: !lambda 'return (int)x;'
+
+  # Dedicated physical water temperature sensor
+  - platform: homeassistant
+    id: water_temp
+    entity_id: ${water_temp_entity}
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: lbl_water_temp
+            text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Water: %.1f°C", x); return std::string(b);'
+
+  # Target temperature currently set in HA - used to initialize the knob
+  # position on boot / after HA-side changes, without fighting local turns.
+  - platform: homeassistant
+    id: ha_target_temp
+    entity_id: ${climate_entity}
+    attribute: temperature
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(setpoint_synced);'
+            then:
+              - globals.set:
+                  id: ha_target_units
+                  value: !lambda 'return (int) std::round(x * 2.0f);'
+              - script.execute: sync_knob_from_ha
+              - globals.set:
+                  id: setpoint_synced
+                  value: 'true'
+
+text_sensor:
+  # hvac_action: what the heat pump is actually doing right now (heating/idle/off)
+  - platform: homeassistant
+    id: hvac_action
+    entity_id: ${climate_entity}
+    attribute: hvac_action
+    on_value:
+      then:
+        - lambda: |-
+            std::string action = x;
+            lv_color_t color;
+            if (action == "heating") {
+              color = lv_color_hex(0xFF6600);
+            } else if (action == "idle") {
+              color = lv_color_hex(0x00BFFF);
+            } else if (action == "off") {
+              color = lv_color_hex(0x888888);
+            } else {
+              color = lv_color_hex(0xFFFFFF);
+            }
+            lv_obj_set_style_text_color(id(lbl_hvac_action), color, 0);
+        - lvgl.label.update:
+            id: lbl_hvac_action
+            text: !lambda |-
+              std::string action = id(hvac_action).state;
+              if (action == "heating") return "Heating";
+              if (action == "idle") return "Idle";
+              if (action == "off") return "Off";
+              return action;
+
+  # hvac_mode: the entity's actual mode - this device only supports auto/off
+  - platform: homeassistant
+    id: hvac_mode
+    entity_id: ${climate_entity}
+    on_value:
+      then:
+        - lambda: |-
+            std::string mode = x;
+            id(is_mode_on) = (mode != "off");
+            lv_color_t color = id(is_mode_on) ? lv_color_hex(0x00FF00) : lv_color_hex(0x888888);
+            lv_obj_set_style_text_color(id(lbl_mode), color, 0);
+        - lvgl.label.update:
+            id: lbl_mode
+            text: !lambda |-
+              std::string mode = id(hvac_mode).state;
+              char b[32];
+              snprintf(b, sizeof(b), "Mode: %s",
+                       mode == "auto" ? "Auto" : (mode == "off" ? "Off" : mode.c_str()));
+              return std::string(b);
+
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+
+# Debounce knob turns before actually calling the HA service, so rapid
+# rotation doesn't spam climate.set_temperature.
+script:
+  - id: screentime
+    mode: restart
+    then:
+      - light.turn_on: back_light
+      - delay: ${screensaver}
+      - light.turn_off: back_light
+
+  # Called with no trigger-value parameters, so the templated set_value
+  # action (which only compiles cleanly outside of a value-carrying trigger)
+  # can be invoked safely.
+  - id: sync_knob_from_ha
+    then:
+      - sensor.rotary_encoder_custom.set_value:
+          id: rotary_counter
+          value: !lambda 'return id(ha_target_units);'
+      - lvgl.label.update:
+          id: lbl_target
+          text: !lambda |-
+            char b[24];
+            snprintf(b, sizeof(b), "Target: %.1f°C", id(ha_target_units) / 2.0f);
+            return std::string(b);
+
+  - id: commit_setpoint
+    mode: restart
+    then:
+      - delay: 400ms
+      - homeassistant.action:
+          action: climate.set_temperature
+          data:
+            entity_id: ${climate_entity}
+            temperature: !lambda 'return (float)id(pending_setpoint_units) / 2.0f;'
+
+  - id: toggle_heatpump
+    then:
+      - if:
+          condition:
+            lambda: 'return id(is_mode_on);'
+          then:
+            - homeassistant.action:
+                action: climate.set_hvac_mode
+                data:
+                  entity_id: ${climate_entity}
+                  hvac_mode: "off"
+          else:
+            - homeassistant.action:
+                action: climate.set_hvac_mode
+                data:
+                  entity_id: ${climate_entity}
+                  hvac_mode: "auto"
+
+# ---------------------------------------------------------------------------
+# LVGL UI
+# ---------------------------------------------------------------------------
+font:
+  - file: "gfonts://Roboto"
+    id: roboto
+    size: 20
+  - file: "gfonts://Roboto"
+    id: roboto_28
+    size: 28
+  - file: "gfonts://Roboto"
+    id: roboto_48
+    size: 48
+
+lvgl:
+  id: my_lvgl
+  displays:
+    - main_display
+  touchscreens:
+    - my_touchscreen
+  color_depth: 16
+  bg_color: 0x001020
+
+  pages:
+    - id: main_page
+      widgets:
+        # Outer gauge: current water temperature
+        - arc:
+            id: temp_arc
+            align: CENTER
+            width: 340
+            height: 340
+            arc_width: 14
+            start_angle: 135
+            end_angle: 45
+            min_value: 10
+            max_value: 45
+            value: 10
+            adjustable: false
+            arc_color: 0x00BFFF
+            indicator:
+              arc_color: 0xFF6600
+
+        # Big current temperature reading
+        - label:
+            id: lbl_current_temp
+            align: CENTER
+            y: -30
+            text_font: roboto_48
+            text_color: 0xFFFFFF
+            text: "--.-°C"
+
+        # Target / setpoint (driven by the knob)
+        - label:
+            id: lbl_target
+            align: CENTER
+            y: 30
+            text_font: roboto_28
+            text_color: 0x00BFFF
+            text: "Target: --°C"
+
+        # Heat pump status (heating / idle / off)
+        - label:
+            id: lbl_hvac_action
+            align: CENTER
+            y: 75
+            text_font: roboto
+            text_color: 0x888888
+            text: "..."
+
+        # Heat pump mode (auto / off) - what the touch toggle controls
+        - label:
+            id: lbl_mode
+            align: CENTER
+            y: 105
+            text_font: roboto
+            text_color: 0x888888
+            text: "Mode: --"
+
+        # Dedicated physical water temperature sensor
+        - label:
+            id: lbl_water_temp
+            align: CENTER
+            y: 135
+            text_font: roboto
+            text_color: 0x00BFFF
+            text: "Water: --.-°C"

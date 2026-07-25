@@ -1,0 +1,4 @@
+secrets.yaml
+.esphome/
+*.bin
+.ha_token.secret
