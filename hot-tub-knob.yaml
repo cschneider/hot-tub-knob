@@ -122,8 +122,16 @@ touchscreen:
       swap_xy: false
     on_touch:
       then:
-        - script.execute: screentime
-        - script.execute: toggle_heatpump
+        - if:
+            condition:
+              lambda: 'return id(display_on);'
+            then:
+              - script.execute: screentime
+              - script.execute: toggle_heatpump
+            else:
+              # Display was off/dimmed - this tap should only wake it,
+              # not also act as a mode-toggle tap.
+              - script.execute: screentime
 
 output:
   - platform: ledc
@@ -143,16 +151,28 @@ light:
       brightness: 50%
     on_turn_off:
       then:
+        - globals.set:
+            id: display_on
+            value: 'false'
         - lvgl.pause:
             show_snow: true
     on_turn_on:
       then:
+        - globals.set:
+            id: display_on
+            value: 'true'
         - lvgl.resume:
 
 # ---------------------------------------------------------------------------
 # Rotary encoder (the physical knob) -> adjusts the setpoint
 # ---------------------------------------------------------------------------
 globals:
+  # Tracks whether the backlight/display is currently on, so the first tap
+  # after it's off just wakes it instead of also toggling the heat pump mode.
+  - id: display_on
+    type: bool
+    restore_value: false
+    initial_value: 'true'
   # Pending setpoint in half-degree units (actual °C = this / 2.0)
   - id: pending_setpoint_units
     type: int
