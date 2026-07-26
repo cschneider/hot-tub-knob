@@ -11,6 +11,14 @@ substitutions:
   # Raw Modbus enum register (0=Auto, 1=Heating, 2=Cooling) - see
   # update_mode_label below.
   heat_pump_operating_mode_entity: "sensor.hot_tub_heat_pump_operating_mode"
+  # Mode-aware target setpoint (template number entity in
+  # ha-stack's template_hottub.yaml). The heat pump keeps a separate
+  # setpoint register per operating mode (Auto/Heating/Cooling), and
+  # climate.hot_tub_heat_pump's target_temp_register is hardwired to
+  # Auto's register only - this entity picks whichever register matches
+  # the current mode, both for reading and writing. Use this instead of
+  # climate.set_temperature. See pool-heatpump-integration.md (2026-07-26).
+  target_temp_entity: "number.hot_tub_heat_pump_target_temp"
   # How long the display stays lit after last interaction
   screensaver: 30s
   # Setpoint range the knob is allowed to dial, in actual degrees C
@@ -362,10 +370,12 @@ sensor:
 
   # Target temperature currently set in HA - used to initialize the knob
   # position on boot / after HA-side changes, without fighting local turns.
+  # Reads target_temp_entity (mode-aware number, not climate_entity's
+  # `temperature` attribute) since the latter is hardwired to Auto's
+  # setpoint register regardless of actual mode - see substitutions above.
   - platform: homeassistant
     id: ha_target_temp
-    entity_id: ${climate_entity}
-    attribute: temperature
+    entity_id: ${target_temp_entity}
     on_value:
       then:
         # Always keep ha_target_units current - the periodic resync
@@ -502,11 +512,14 @@ script:
     mode: restart
     then:
       - delay: 400ms
+      # Goes through target_temp_entity (mode-aware number), not
+      # climate.set_temperature - the latter always writes Auto's setpoint
+      # register regardless of actual mode. See substitutions above.
       - homeassistant.action:
-          action: climate.set_temperature
+          action: number.set_value
           data:
-            entity_id: ${climate_entity}
-            temperature: !lambda 'return (float)id(pending_setpoint_units) / 2.0f;'
+            entity_id: ${target_temp_entity}
+            value: !lambda 'return (float)id(pending_setpoint_units) / 2.0f;'
 
   - id: toggle_heatpump
     then:
@@ -577,7 +590,7 @@ font:
   # MaterialSymbolsOutlined.codepoints source file.
   - file: "gfonts://Material+Symbols+Outlined"
     id: icons_mode
-    size: 24
+    size: 36
     glyphs:
       - "" # sunny (Heating)
       - "" # snowflake (Cooling)
@@ -708,7 +721,7 @@ lvgl:
         - label:
             id: lbl_inlet_temp
             align: CENTER
-            y: 95
+            y: 110
             text_font: roboto
             text_color: 0x00BFFF
             text: "Inlet: --.-°C"
@@ -716,7 +729,7 @@ lvgl:
         - label:
             id: lbl_outlet_temp
             align: CENTER
-            y: 119
+            y: 134
             text_font: roboto
             text_color: 0x00BFFF
             text: "Outlet: --.-°C"

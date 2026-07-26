@@ -33,8 +33,9 @@
     <!-- Target / setpoint -->
     <text x="220" y="260" text-anchor="middle" font-size="26" fill="#00BFFF">Target: 36.0°C</text>
 
-    <!-- Mode icon: sun = Heating (orange) -->
-    <g transform="translate(220,285)" stroke="#FF6600" stroke-width="2" stroke-linecap="round">
+    <!-- Mode icon: sun = Heating (orange). 1.5x scale to match the
+         firmware's icons_mode font bump from 24px to 36px. -->
+    <g transform="translate(220,285) scale(1.5)" stroke="#FF6600" stroke-width="2" stroke-linecap="round">
       <circle r="6" fill="#FF6600" stroke="none"/>
       <line x1="0" y1="-8" x2="0" y2="-12"/>
       <line x1="0" y1="8" x2="0" y2="12"/>
@@ -46,9 +47,9 @@
       <line x1="5.7" y1="5.7" x2="8.5" y2="8.5"/>
     </g>
 
-    <!-- Heat pump water inlet/outlet temps -->
-    <text x="220" y="315" text-anchor="middle" font-size="20" fill="#00BFFF">Inlet: 37.5°C</text>
-    <text x="220" y="339" text-anchor="middle" font-size="20" fill="#00BFFF">Outlet: 38.5°C</text>
+    <!-- Heat pump water inlet/outlet temps - moved down 15px to clear the larger mode icon -->
+    <text x="220" y="330" text-anchor="middle" font-size="20" fill="#00BFFF">Inlet: 37.5°C</text>
+    <text x="220" y="354" text-anchor="middle" font-size="20" fill="#00BFFF">Outlet: 38.5°C</text>
 
     <!-- Battery icon (top-right, ~70% charged) -->
     <rect x="115" y="136" width="30" height="14" rx="2" fill="none" stroke="#AAAAAA" stroke-width="2"/>
