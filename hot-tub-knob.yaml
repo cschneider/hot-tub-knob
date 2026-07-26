@@ -133,10 +133,18 @@ touchscreen:
               lambda: 'return id(display_on);'
             then:
               - script.execute: screentime
-              - script.execute: toggle_heatpump
+              - if:
+                  # Top-right area (near the power symbol) toggles on/off;
+                  # anywhere else cycles the Auto/Heating/Cooling submode.
+                  condition:
+                    lambda: 'return touch.x > 210 && touch.y < 140;'
+                  then:
+                    - script.execute: toggle_heatpump
+                  else:
+                    - script.execute: cycle_operating_mode
             else:
               # Display was off/dimmed - this tap should only wake it,
-              # not also act as a mode-toggle tap.
+              # not also act as a mode-toggle/cycle tap.
               - script.execute: screentime
 
 output:
@@ -197,6 +205,22 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
+  # True whenever the knob hasn't been physically turned recently - gates
+  # the periodic HA resync below so it doesn't fight an active turn.
+  - id: knob_quiet
+    type: bool
+    restore_value: false
+    initial_value: 'true'
+  # True while sync_knob_from_ha is applying a programmatic value to
+  # rotary_counter, since sensor.rotary_encoder_custom.set_value fires
+  # rotary_counter's own on_value (it calls publish_state internally) -
+  # without this guard, a periodic/boot sync would look just like a
+  # physical turn: waking the backlight and echoing an unnecessary
+  # climate.set_temperature back to HA.
+  - id: syncing_in_progress
+    type: bool
+    restore_value: false
+    initial_value: 'false'
 
 sensor:
   - platform: rotary_encoder_custom
@@ -210,14 +234,23 @@ sensor:
     restore_mode: RESTORE_DEFAULT_ZERO
     on_value:
       then:
-        - script.execute: screentime
-        - globals.set:
-            id: pending_setpoint_units
-            value: !lambda 'return (int)x;'
-        - lvgl.label.update:
-            id: lbl_target
-            text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Target: %.1f°C", x / 2.0f); return std::string(b);'
-        - script.execute: commit_setpoint
+        # Skip all of this for a programmatic sync from HA (see
+        # syncing_in_progress) - sync_knob_from_ha already does its own
+        # label/marker update, and a sync is not "the user touched it".
+        - if:
+            condition:
+              lambda: 'return !id(syncing_in_progress);'
+            then:
+              - script.execute: screentime
+              - script.execute: mark_knob_active
+              - globals.set:
+                  id: pending_setpoint_units
+                  value: !lambda 'return (int)x;'
+              - lvgl.label.update:
+                  id: lbl_target
+                  text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Target: %.1f°C", x / 2.0f); return std::string(b);'
+              - script.execute: update_target_marker
+              - script.execute: commit_setpoint
 
   # Battery voltage (GPIO1 = ADC1_CH0, behind a 2:1 divider on this board)
   - platform: adc
@@ -270,15 +303,13 @@ sensor:
           return x;
     on_value:
       then:
-        - lvgl.label.update:
-            id: lbl_battery
-            text: !lambda 'char b[16]; snprintf(b, sizeof(b), "Batt: %.0f%%", x); return std::string(b);'
         - lambda: |-
             lv_color_t color;
             if (x > 50) color = lv_color_hex(0x00FF00);
             else if (x > 20) color = lv_color_hex(0xFFA500);
             else color = lv_color_hex(0xFF0000);
-            lv_obj_set_style_text_color(id(lbl_battery), color, 0);
+            lv_obj_set_width(id(batt_fill), (int) (x / 100.0f * 26));
+            lv_obj_set_style_bg_color(id(batt_fill), color, 0);
 
   # Heat pump's own current_temperature attribute (== water inlet temp on
   # this Modbus register map) - secondary reading, shown at the bottom (see
@@ -337,13 +368,15 @@ sensor:
     attribute: temperature
     on_value:
       then:
+        # Always keep ha_target_units current - the periodic resync
+        # interval below applies it to the knob when it's safe to.
+        - globals.set:
+            id: ha_target_units
+            value: !lambda 'return (int) std::round(x * 2.0f);'
         - if:
             condition:
               lambda: 'return !id(setpoint_synced);'
             then:
-              - globals.set:
-                  id: ha_target_units
-                  value: !lambda 'return (int) std::round(x * 2.0f);'
               - script.execute: sync_knob_from_ha
               - globals.set:
                   id: setpoint_synced
@@ -375,6 +408,20 @@ script:
       - delay: ${screensaver}
       - light.turn_off: back_light
 
+  # Marks the knob as "active" for 10s after each physical turn, so the
+  # periodic HA resync below (see interval:) doesn't fight an in-progress
+  # adjustment.
+  - id: mark_knob_active
+    mode: restart
+    then:
+      - globals.set:
+          id: knob_quiet
+          value: 'false'
+      - delay: 10s
+      - globals.set:
+          id: knob_quiet
+          value: 'true'
+
   # Combines hvac_mode's on/off state with hp_operating_mode's
   # Auto/Heating/Cooling submode (0/1/2) to label what the heat pump is set
   # to do. The Modbus climate entity has no hvac_action attribute to read
@@ -382,39 +429,66 @@ script:
   - id: update_mode_label
     then:
       - lambda: |-
-          std::string mode_text;
+          const char *icon;
           lv_color_t color;
           if (!id(is_mode_on)) {
-            mode_text = "Off";
+            icon = "";
             color = lv_color_hex(0x888888);
           } else if (!id(hp_operating_mode).has_state()) {
-            mode_text = "Auto";
-            color = lv_color_hex(0x00FF00);
+            icon = ""; // thermostat_auto
+            color = lv_color_hex(0xCCCCCC);
           } else {
             int mode = (int) id(hp_operating_mode).state;
             if (mode == 1) {
-              mode_text = "Heating";
+              icon = ""; // sunny (Heating)
               color = lv_color_hex(0xFF6600);
             } else if (mode == 2) {
-              mode_text = "Cooling";
+              icon = ""; // snowflake (Cooling)
               color = lv_color_hex(0x00BFFF);
             } else {
-              mode_text = "Auto";
-              color = lv_color_hex(0x00FF00);
+              icon = ""; // thermostat_auto
+              color = lv_color_hex(0xCCCCCC);
             }
           }
-          char b[32];
-          snprintf(b, sizeof(b), "Mode: %s", mode_text.c_str());
           lv_obj_set_style_text_color(id(lbl_mode), color, 0);
-          lv_label_set_text(id(lbl_mode), b);
+          lv_label_set_text(id(lbl_mode), icon);
+          lv_color_t pwr_color = id(is_mode_on) ? lv_color_hex(0x00FF00) : lv_color_hex(0x888888);
+          lv_obj_set_style_text_color(id(pwr_icon), pwr_color, 0);
+
+  # Places target_marker on temp_arc's ring at the angle corresponding to
+  # the current target (pending_setpoint_units), using the same
+  # start_angle/end_angle/min_value/max_value as temp_arc so the marker
+  # lines up with the same physical position the arc's own fill would use.
+  - id: update_target_marker
+    then:
+      - lambda: |-
+          float target_c = id(pending_setpoint_units) / 2.0f;
+          float frac = (target_c - ${setpoint_min}) / (float) (${setpoint_max} - ${setpoint_min});
+          if (frac < 0) frac = 0;
+          if (frac > 1) frac = 1;
+          float angle_deg = 135.0f + frac * 270.0f;
+          if (angle_deg >= 360.0f) angle_deg -= 360.0f;
+          float angle_rad = angle_deg * 3.14159265f / 180.0f;
+          int dx = (int) std::round(170.0f * std::cos(angle_rad));
+          int dy = (int) std::round(170.0f * std::sin(angle_rad));
+          lv_obj_align(id(target_marker), LV_ALIGN_CENTER, dx, dy);
 
   # Called with no trigger-value parameters, so the templated set_value
   # action (which only compiles cleanly outside of a value-carrying trigger)
   # can be invoked safely.
   - id: sync_knob_from_ha
     then:
+      - globals.set:
+          id: syncing_in_progress
+          value: 'true'
       - sensor.rotary_encoder_custom.set_value:
           id: rotary_counter
+          value: !lambda 'return id(ha_target_units);'
+      - globals.set:
+          id: syncing_in_progress
+          value: 'false'
+      - globals.set:
+          id: pending_setpoint_units
           value: !lambda 'return id(ha_target_units);'
       - lvgl.label.update:
           id: lbl_target
@@ -422,6 +496,7 @@ script:
             char b[24];
             snprintf(b, sizeof(b), "Target: %.1f°C", id(ha_target_units) / 2.0f);
             return std::string(b);
+      - script.execute: update_target_marker
 
   - id: commit_setpoint
     mode: restart
@@ -451,6 +526,39 @@ script:
                   entity_id: ${climate_entity}
                   hvac_mode: "auto"
 
+  # Cycles Auto -> Heating -> Cooling -> Auto by writing directly to the
+  # operating-mode holding register (no HA-native entity for this - see
+  # hp_operating_mode above). Only acts while the heat pump is on; a tap
+  # while off does nothing here (use the power dot to turn it on first).
+  - id: cycle_operating_mode
+    then:
+      - if:
+          condition:
+            lambda: 'return id(is_mode_on);'
+          then:
+            - homeassistant.action:
+                action: modbus.write_register
+                data:
+                  hub: hottub_heatpump
+                  slave: "1"
+                  address: "0"
+                  value: !lambda |-
+                    int current = id(hp_operating_mode).has_state() ? (int) id(hp_operating_mode).state : 0;
+                    return (current + 1) % 3;
+
+# Periodic HA resync: applies ha_target_units to the knob's display/position
+# whenever the knob has been quiet (no physical turn) for 10s, so changes
+# made via HA/the app eventually show up here too, without fighting an
+# active turn the way applying on every single HA push would.
+interval:
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(knob_quiet);'
+          then:
+            - script.execute: sync_knob_from_ha
+
 # ---------------------------------------------------------------------------
 # LVGL UI
 # ---------------------------------------------------------------------------
@@ -464,6 +572,16 @@ font:
   - file: "gfonts://Roboto"
     id: roboto_48
     size: 48
+  # Weather-style icons for lbl_mode (Auto/Heating/Cooling), via Google's
+  # Material Symbols icon font - codepoints confirmed against Google's own
+  # MaterialSymbolsOutlined.codepoints source file.
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: icons_mode
+    size: 24
+    glyphs:
+      - "" # sunny (Heating)
+      - "" # snowflake (Cooling)
+      - "" # thermostat_auto (Auto)
 
 lvgl:
   id: my_lvgl
@@ -477,31 +595,86 @@ lvgl:
   pages:
     - id: main_page
       widgets:
-        # Outer gauge: current water temperature
+        # On/off power symbol (top-right, LVGL's built-in power glyph,
+        # U+F011) - tapping this corner toggles on/off; tapping anywhere
+        # else cycles the Auto/Heating/Cooling submode. See
+        # touchscreen.on_touch and update_mode_label.
+        - label:
+            id: pwr_icon
+            align: TOP_RIGHT
+            x: -75
+            y: 82
+            text_font: montserrat_28
+            text_color: 0x888888
+            text: ""
+
+        # Battery icon (same row as the power symbol, further to its left):
+        # outline + terminal nub are static, batt_fill's width/color are
+        # updated by battery_percentage's on_value above.
+        - obj:
+            id: batt_body
+            align: TOP_RIGHT
+            x: -255
+            y: 96
+            width: 30
+            height: 14
+            radius: 2
+            bg_opa: TRANSP
+            border_width: 2
+            border_color: 0xAAAAAA
+        - obj:
+            id: batt_nub
+            align: TOP_RIGHT
+            x: -252
+            y: 100
+            width: 3
+            height: 6
+            radius: 0
+            border_width: 0
+            bg_color: 0xAAAAAA
+        - obj:
+            id: batt_fill
+            align: TOP_LEFT
+            x: 77
+            y: 98
+            width: 0
+            height: 10
+            radius: 0
+            border_width: 0
+            bg_color: 0x888888
+
+        # Outer gauge: current water temperature. Range matches the knob's
+        # actual setpoint_min/max (not some wider arbitrary scale) so the
+        # fill visibly moves; the track itself is a thin/dark "hollow"
+        # guide line, with only the filled indicator bold and colored.
         - arc:
             id: temp_arc
             align: CENTER
             width: 340
             height: 340
-            arc_width: 14
+            arc_width: 3
             start_angle: 135
             end_angle: 45
-            min_value: 10
-            max_value: 45
-            value: 10
+            min_value: ${setpoint_min}
+            max_value: ${setpoint_max}
+            value: ${setpoint_min}
             adjustable: false
-            arc_color: 0x00BFFF
+            arc_color: 0x333333
             indicator:
+              arc_width: 14
               arc_color: 0xFF6600
 
-        # Battery percentage (top area, otherwise unused space)
-        - label:
-            id: lbl_battery
+        # Target setpoint marker - a dot placed on temp_arc's ring at the
+        # angle corresponding to the current target, kept in sync by
+        # update_target_marker (called whenever the target changes).
+        - obj:
+            id: target_marker
             align: CENTER
-            y: -140
-            text_font: roboto
-            text_color: 0x888888
-            text: "Batt: --%"
+            width: 10
+            height: 10
+            radius: 5
+            border_width: 0
+            bg_color: 0xFFFFFF
 
         # Big reading: dedicated water temperature sensor (the main reading)
         - label:
@@ -521,15 +694,15 @@ lvgl:
             text_color: 0x00BFFF
             text: "Target: --°C"
 
-        # Heat pump mode (auto / heating / cooling / off) - what the touch
-        # toggle controls
+        # Heat pump mode (auto / heating / cooling / off) as an icon - what
+        # the touch toggle/cycle controls. See update_mode_label.
         - label:
             id: lbl_mode
             align: CENTER
             y: 65
-            text_font: roboto
+            text_font: icons_mode
             text_color: 0x888888
-            text: "Mode: --"
+            text: ""
 
         # Secondary readings: heat pump's own water inlet/outlet temps
         - label:

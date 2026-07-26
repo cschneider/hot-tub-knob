@@ -17,11 +17,19 @@ inlet/outlet temperature readings.*
   secondary readings below.
 - Shows the target setpoint, adjustable by turning the physical knob in
   **0.5°C steps**.
-- Shows what the heat pump is set to do (Auto / Heating / Cooling / Off).
+- Shows what the heat pump is set to do as an icon: sun in red (Heating),
+  snowflake in blue (Cooling), or a neutral gray thermostat-auto icon
+  (Auto) - blank when off. A separate power symbol (top-right, LVGL's
+  built-in power glyph) is green when on, gray when off.
+- Shows the knob's own battery level (top-right, next to the power symbol)
+  as a small battery icon whose fill bar grows/shrinks and changes color
+  (green/orange/red) with charge, rather than a bare percentage.
 - Turning the knob calls `climate.set_temperature` (debounced 400ms so rapid
   turning doesn't spam Home Assistant).
-- Tapping the touchscreen toggles the heat pump between `auto` and `off`
-  (`climate.set_hvac_mode`).
+- Tapping the power symbol (top-right) toggles the heat pump between `auto`
+  and `off` (`climate.set_hvac_mode`). Tapping anywhere else on the screen
+  cycles Auto → Heating → Cooling (only while on) by writing directly to
+  the heat pump's operating-mode Modbus register.
 - The knob's position is synced from Home Assistant once at boot, then left
   alone so local turns aren't fought/overwritten by HA state updates.
 - Backlight dims/sleeps after an idle timeout and wakes on touch or knob turn.
@@ -167,19 +175,41 @@ one — it's easy to toggle a different device's entry by mistake.
   encoder's raw value divides or multiplies by 2 to convert to/from actual
   °C. Look for `pending_setpoint_units` / `ha_target_units` in the config —
   "units" always means half-degree steps, never actual °C.
-- **One-way boot sync, not continuous sync.** The knob's position is set
-  from HA's current target temperature once, right after boot
-  (`setpoint_synced` latches `true` after the first sync). After that,
-  changes made directly in Home Assistant do **not** move the knob — this
-  is intentional, so the display doesn't fight your hand mid-turn. If you
-  want live two-way sync instead, remove the `setpoint_synced` guard in the
-  `ha_target_temp` sensor's `on_value` handler (accepting that a HA-side
-  change could visibly jump the knob's displayed value while you're not
-  touching it).
+- **Boot sync, plus a quiet-period periodic resync.** The knob's position
+  is set from HA's current target temperature once, right after boot
+  (`setpoint_synced` latches `true` after the first sync), so the display
+  doesn't fight your hand mid-turn on startup. After that, an `interval:`
+  every 10s re-applies the latest known HA target (`ha_target_units`,
+  always kept current by `ha_target_temp`'s `on_value`) - but only when
+  `knob_quiet` is true, i.e. the knob hasn't been physically turned in the
+  last 10s (`mark_knob_active`). This is how a change made via HA or the
+  app eventually shows up on the knob too, without visibly jumping the
+  display while you're actively turning it.
+- **`syncing_in_progress` guards against a sync looking like a turn.**
+  `sensor.rotary_encoder_custom.set_value` internally calls `publish_state`
+  (see the component's `loop()`), which fires `rotary_counter`'s own
+  `on_value` - the same trigger a physical turn uses. Without a guard, every
+  programmatic sync would also wake the backlight, reset `knob_quiet`, and
+  echo an unnecessary `climate.set_temperature` back to HA.
+  `sync_knob_from_ha` sets `syncing_in_progress` around the `set_value`
+  call specifically so `rotary_counter`'s `on_value` handler can tell the
+  two cases apart and skip all of that for a sync.
 - **Debounced setpoint commits.** `commit_setpoint` uses `mode: restart`
   with a 400ms delay, so a burst of knob turns collapses into a single
   `climate.set_temperature` call after you stop turning, rather than one
   call per detent.
+- **Gauge ring scale and target marker.** `temp_arc`'s range matches
+  `setpoint_min`/`setpoint_max` (not some wider arbitrary scale), so the
+  fill actually moves visibly instead of crawling across a much wider
+  range. The unfilled track is a thin, dark "hollow" guide line
+  (`arc_width: 3`, dark gray) rather than a solid color band; only the
+  filled indicator (current value) is bold and colored. `target_marker` is
+  a small dot placed on the ring by `update_target_marker`, which converts
+  the target setpoint to an angle using the *same* start/end
+  angle and min/max as `temp_arc` so it lines up with where the arc's own
+  fill would reach at that value - see the trig in that script if the ring
+  geometry (radius, angles) ever changes, since the marker's math is
+  derived from those same constants rather than referencing them directly.
 - **`current_temp` vs `water_temp`.** The big number on the main gauge is
   driven by `water_temp_entity`'s standalone sensor; the heat pump's own
   water inlet/outlet temps (`current_temp` / `water_outlet_temp`) are shown
@@ -202,6 +232,15 @@ one — it's easy to toggle a different device's entry by mistake.
   firmware also derived a live Heating/Cooling/Idle/Off status from the
   inlet/outlet temp delta - removed as redundant once this register was
   wired up.)
+- **Two touch zones on one touchscreen.** With no second button available,
+  `on_touch`'s trigger variable `touch.x`/`touch.y` is used to split the
+  screen into two zones: the top-right corner (near the `pwr_dot` widget,
+  roughly `x > 260 && y < 100`) toggles on/off; everywhere else cycles the
+  operating mode. There's no HA-native entity to write the operating-mode
+  register (it's a raw Modbus enum, see above), so `cycle_operating_mode`
+  calls the generic `modbus.write_register` service directly - the same
+  approach used for `climate.set_temperature`, just one level lower since
+  no purpose-built HA entity exists for this register.
 
 ## Troubleshooting
 
