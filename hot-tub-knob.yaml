@@ -213,6 +213,67 @@ sensor:
             text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Target: %.1f°C", x / 2.0f); return std::string(b);'
         - script.execute: commit_setpoint
 
+  # Battery voltage (GPIO1 = ADC1_CH0, behind a 2:1 divider on this board)
+  - platform: adc
+    id: battery_voltage
+    pin: GPIO1
+    attenuation: 12db
+    update_interval: 30s
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    internal: true
+    filters:
+      - multiply: 2.0
+      - median:
+          window_size: 7
+          send_every: 7
+          send_first_at: 7
+    on_value:
+      then:
+        - component.update: battery_percentage
+
+  - platform: template
+    id: battery_percentage
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    internal: true
+    lambda: |-
+      float v = id(battery_voltage).state;
+      if (std::isnan(v) || std::isinf(v)) return 0.0f;
+      return v;
+    filters:
+      - calibrate_linear:
+          method: exact
+          datapoints:
+            - 3.00 -> 0.0
+            - 3.30 -> 5.0
+            - 3.50 -> 10.0
+            - 3.60 -> 20.0
+            - 3.65 -> 30.0
+            - 3.70 -> 40.0
+            - 3.75 -> 50.0
+            - 3.80 -> 60.0
+            - 3.90 -> 70.0
+            - 4.00 -> 80.0
+            - 4.10 -> 90.0
+            - 4.15 -> 95.0
+            - 4.20 -> 100.0
+      - lambda: |-
+          if (x > 100) return 100.0f;
+          if (x < 0) return 0.0f;
+          return x;
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: lbl_battery
+            text: !lambda 'char b[16]; snprintf(b, sizeof(b), "Batt: %.0f%%", x); return std::string(b);'
+        - lambda: |-
+            lv_color_t color;
+            if (x > 50) color = lv_color_hex(0x00FF00);
+            else if (x > 20) color = lv_color_hex(0xFFA500);
+            else color = lv_color_hex(0xFF0000);
+            lv_obj_set_style_text_color(id(lbl_battery), color, 0);
+
   # Current water temperature reported by the heat pump's climate entity
   - platform: homeassistant
     id: current_temp
@@ -406,6 +467,15 @@ lvgl:
             arc_color: 0x00BFFF
             indicator:
               arc_color: 0xFF6600
+
+        # Battery percentage (top area, otherwise unused space)
+        - label:
+            id: lbl_battery
+            align: CENTER
+            y: -140
+            text_font: roboto
+            text_color: 0x888888
+            text: "Batt: --%"
 
         # Big current temperature reading
         - label:
