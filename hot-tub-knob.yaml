@@ -5,6 +5,12 @@ substitutions:
   climate_entity: "climate.hot_tub_heat_pump"
   # Dedicated physical water temperature sensor
   water_temp_entity: "sensor.hottub_temp"
+  # Heat pump water outlet temp - shown alongside the inlet temp (the
+  # climate entity's current_temperature) as secondary readings.
+  water_outlet_entity: "sensor.hot_tub_heat_pump_water_outlet_temp"
+  # Raw Modbus enum register (0=Auto, 1=Heating, 2=Cooling) - see
+  # update_mode_label below.
+  heat_pump_operating_mode_entity: "sensor.hot_tub_heat_pump_operating_mode"
   # How long the display stays lit after last interaction
   screensaver: 30s
   # Setpoint range the knob is allowed to dial, in actual degrees C
@@ -213,7 +219,9 @@ sensor:
             text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Target: %.1f°C", x / 2.0f); return std::string(b);'
         - script.execute: commit_setpoint
 
-  # Current water temperature reported by the heat pump's climate entity
+  # Heat pump's own current_temperature attribute (== water inlet temp on
+  # this Modbus register map) - secondary reading, shown at the bottom (see
+  # water_temp below for the main center reading).
   - platform: homeassistant
     id: current_temp
     entity_id: ${climate_entity}
@@ -221,21 +229,44 @@ sensor:
     on_value:
       then:
         - lvgl.label.update:
-            id: lbl_current_temp
-            text: !lambda 'char b[16]; snprintf(b, sizeof(b), "%.1f°C", x); return std::string(b);'
-        - lvgl.arc.update:
-            id: temp_arc
-            value: !lambda 'return (int)x;'
+            id: lbl_inlet_temp
+            text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Inlet: %.1f°C", x); return std::string(b);'
 
-  # Dedicated physical water temperature sensor
+  # Heat pump water outlet temp - secondary reading, shown at the bottom.
+  - platform: homeassistant
+    id: water_outlet_temp
+    entity_id: ${water_outlet_entity}
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: lbl_outlet_temp
+            text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Outlet: %.1f°C", x); return std::string(b);'
+
+  # Heat pump's selected operating submode (Auto/Heating/Cooling) - a raw
+  # Modbus enum register with no HA-native concept, exposed as a plain
+  # numeric sensor in ha-stack's modbus_hottub.yaml. 0=Auto, 1=Heating,
+  # 2=Cooling, confirmed empirically by switching modes in the vendor app.
+  # Feeds update_mode_label below, alongside hvac_mode's on/off state.
+  - platform: homeassistant
+    id: hp_operating_mode
+    entity_id: ${heat_pump_operating_mode_entity}
+    on_value:
+      then:
+        - script.execute: update_mode_label
+
+  # Dedicated physical water temperature sensor - the main reading, driving
+  # both the big center label and the gauge arc.
   - platform: homeassistant
     id: water_temp
     entity_id: ${water_temp_entity}
     on_value:
       then:
         - lvgl.label.update:
-            id: lbl_water_temp
-            text: !lambda 'char b[24]; snprintf(b, sizeof(b), "Water: %.1f°C", x); return std::string(b);'
+            id: lbl_main_temp
+            text: !lambda 'char b[16]; snprintf(b, sizeof(b), "%.1f°C", x); return std::string(b);'
+        - lvgl.arc.update:
+            id: temp_arc
+            value: !lambda 'return (int)x;'
 
   # Target temperature currently set in HA - used to initialize the knob
   # position on boot / after HA-side changes, without fighting local turns.
@@ -258,54 +289,16 @@ sensor:
                   value: 'true'
 
 text_sensor:
-  # hvac_action: what the heat pump is actually doing right now (heating/idle/off)
-  - platform: homeassistant
-    id: hvac_action
-    entity_id: ${climate_entity}
-    attribute: hvac_action
-    on_value:
-      then:
-        - lambda: |-
-            std::string action = x;
-            lv_color_t color;
-            if (action == "heating") {
-              color = lv_color_hex(0xFF6600);
-            } else if (action == "idle") {
-              color = lv_color_hex(0x00BFFF);
-            } else if (action == "off") {
-              color = lv_color_hex(0x888888);
-            } else {
-              color = lv_color_hex(0xFFFFFF);
-            }
-            lv_obj_set_style_text_color(id(lbl_hvac_action), color, 0);
-        - lvgl.label.update:
-            id: lbl_hvac_action
-            text: !lambda |-
-              std::string action = id(hvac_action).state;
-              if (action == "heating") return "Heating";
-              if (action == "idle") return "Idle";
-              if (action == "off") return "Off";
-              return action;
-
-  # hvac_mode: the entity's actual mode - this device only supports auto/off
+  # hvac_mode: the entity's actual mode - this device only supports auto/off.
+  # The finer-grained Auto/Heating/Cooling submode comes from
+  # hp_operating_mode above; both feed update_mode_label.
   - platform: homeassistant
     id: hvac_mode
     entity_id: ${climate_entity}
     on_value:
       then:
-        - lambda: |-
-            std::string mode = x;
-            id(is_mode_on) = (mode != "off");
-            lv_color_t color = id(is_mode_on) ? lv_color_hex(0x00FF00) : lv_color_hex(0x888888);
-            lv_obj_set_style_text_color(id(lbl_mode), color, 0);
-        - lvgl.label.update:
-            id: lbl_mode
-            text: !lambda |-
-              std::string mode = id(hvac_mode).state;
-              char b[32];
-              snprintf(b, sizeof(b), "Mode: %s",
-                       mode == "auto" ? "Auto" : (mode == "off" ? "Off" : mode.c_str()));
-              return std::string(b);
+        - lambda: 'id(is_mode_on) = (x != "off");'
+        - script.execute: update_mode_label
 
   - platform: wifi_info
     ip_address:
@@ -320,6 +313,39 @@ script:
       - light.turn_on: back_light
       - delay: ${screensaver}
       - light.turn_off: back_light
+
+  # Combines hvac_mode's on/off state with hp_operating_mode's
+  # Auto/Heating/Cooling submode (0/1/2) to label what the heat pump is set
+  # to do. The Modbus climate entity has no hvac_action attribute to read
+  # a live "what it's actually doing" status from directly.
+  - id: update_mode_label
+    then:
+      - lambda: |-
+          std::string mode_text;
+          lv_color_t color;
+          if (!id(is_mode_on)) {
+            mode_text = "Off";
+            color = lv_color_hex(0x888888);
+          } else if (!id(hp_operating_mode).has_state()) {
+            mode_text = "Auto";
+            color = lv_color_hex(0x00FF00);
+          } else {
+            int mode = (int) id(hp_operating_mode).state;
+            if (mode == 1) {
+              mode_text = "Heating";
+              color = lv_color_hex(0xFF6600);
+            } else if (mode == 2) {
+              mode_text = "Cooling";
+              color = lv_color_hex(0x00BFFF);
+            } else {
+              mode_text = "Auto";
+              color = lv_color_hex(0x00FF00);
+            }
+          }
+          char b[32];
+          snprintf(b, sizeof(b), "Mode: %s", mode_text.c_str());
+          lv_obj_set_style_text_color(id(lbl_mode), color, 0);
+          lv_label_set_text(id(lbl_mode), b);
 
   # Called with no trigger-value parameters, so the templated set_value
   # action (which only compiles cleanly outside of a value-carrying trigger)
@@ -407,9 +433,9 @@ lvgl:
             indicator:
               arc_color: 0xFF6600
 
-        # Big current temperature reading
+        # Big reading: dedicated water temperature sensor (the main reading)
         - label:
-            id: lbl_current_temp
+            id: lbl_main_temp
             align: CENTER
             y: -30
             text_font: roboto_48
@@ -425,29 +451,29 @@ lvgl:
             text_color: 0x00BFFF
             text: "Target: --°C"
 
-        # Heat pump status (heating / idle / off)
-        - label:
-            id: lbl_hvac_action
-            align: CENTER
-            y: 75
-            text_font: roboto
-            text_color: 0x888888
-            text: "..."
-
-        # Heat pump mode (auto / off) - what the touch toggle controls
+        # Heat pump mode (auto / heating / cooling / off) - what the touch
+        # toggle controls
         - label:
             id: lbl_mode
             align: CENTER
-            y: 105
+            y: 65
             text_font: roboto
             text_color: 0x888888
             text: "Mode: --"
 
-        # Dedicated physical water temperature sensor
+        # Secondary readings: heat pump's own water inlet/outlet temps
         - label:
-            id: lbl_water_temp
+            id: lbl_inlet_temp
             align: CENTER
-            y: 135
+            y: 95
             text_font: roboto
             text_color: 0x00BFFF
-            text: "Water: --.-°C"
+            text: "Inlet: --.-°C"
+
+        - label:
+            id: lbl_outlet_temp
+            align: CENTER
+            y: 119
+            text_font: roboto
+            text_color: 0x00BFFF
+            text: "Outlet: --.-°C"

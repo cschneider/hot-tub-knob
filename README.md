@@ -7,17 +7,17 @@ controls a hot tub heat pump exposed in Home Assistant as a `climate` entity.
 ![UI mockup](assets/ui-mockup.png)
 
 *Mockup of the main screen layout (not a photo of the physical device) —
-gauge arc for current temp, target setpoint, HVAC action, mode, and the
-dedicated water temperature sensor reading.*
+gauge arc for water temp, target setpoint, mode, and the heat pump's own
+inlet/outlet temperature readings.*
 
 ## What it does
 
-- Displays the current water temperature (from a dedicated HA sensor) and the
-  heat pump's own `current_temperature` on a circular gauge.
+- Displays the dedicated water temperature sensor as the big center reading
+  and gauge arc, with the heat pump's own water inlet/outlet temps shown as
+  secondary readings below.
 - Shows the target setpoint, adjustable by turning the physical knob in
   **0.5°C steps**.
-- Shows the heat pump's HVAC action (Heating / Idle / Off) and its mode
-  (Auto / Off).
+- Shows what the heat pump is set to do (Auto / Heating / Cooling / Off).
 - Turning the knob calls `climate.set_temperature` (debounced 400ms so rapid
   turning doesn't spam Home Assistant).
 - Tapping the touchscreen toggles the heat pump between `auto` and `off`
@@ -181,9 +181,27 @@ one — it's easy to toggle a different device's entry by mistake.
   `climate.set_temperature` call after you stop turning, rather than one
   call per detent.
 - **`current_temp` vs `water_temp`.** The big number on the main gauge is
-  driven by the climate entity's own `current_temperature` attribute, which
-  may or may not be the same physical measurement as `water_temp_entity`'s
-  standalone sensor. Both are shown rather than assuming they're identical.
+  driven by `water_temp_entity`'s standalone sensor; the heat pump's own
+  water inlet/outlet temps (`current_temp` / `water_outlet_temp`) are shown
+  as smaller secondary readings at the bottom. These may or may not be the
+  same physical measurement as `water_temp_entity`, so both are shown
+  rather than assuming they're identical.
+- **No `hvac_action` on this climate entity - `lbl_mode` uses a Modbus
+  register instead.** `climate.hot_tub_heat_pump` is HA's built-in
+  `modbus:` climate platform, which has no concept of `hvac_action` at all -
+  confirmed via the HA REST API (`/api/states/climate.hot_tub_heat_pump`
+  never has that attribute). `update_mode_label` instead reads
+  `heat_pump_operating_mode_entity`, a raw Modbus enum register
+  (`sensor.hot_tub_heat_pump_operating_mode` in ha-stack's
+  `modbus_hottub.yaml`, not part of this repo) where `0=Auto, 1=Heating,
+  2=Cooling`, confirmed by switching modes in the vendor app and reading the
+  register back each time. This is a *selected-mode* register, not a live
+  running/idle signal - it stays put even while the compressor is idle
+  within that mode. Full register-map background lives in the `ha-stack`
+  repo's `pool-heatpump-integration.md`. (An earlier version of this
+  firmware also derived a live Heating/Cooling/Idle/Off status from the
+  inlet/outlet temp delta - removed as redundant once this register was
+  wired up.)
 
 ## Troubleshooting
 
