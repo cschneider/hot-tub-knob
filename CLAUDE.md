@@ -74,6 +74,13 @@ options flow` before assuming the firmware config is wrong.
   tick (e.g. `commit_setpoint`) uses `mode: restart` plus a short `delay:`.
   Follow this pattern for any new debounced action rather than inventing a
   new one.
+- Setpoint reads/writes go through `target_temp_entity`
+  (`number.hot_tub_heat_pump_target_temp`, `number.set_value`), never
+  `climate_entity`/`climate.set_temperature`. The heat pump has an
+  independent setpoint register per operating mode, and the `climate`
+  entity is hardwired to the Auto-mode register only — writing via it
+  silently no-ops in Heating/Cooling. `climate_entity` is still used for
+  `current_temperature` (inlet temp) and on/off (`climate.set_hvac_mode`).
 
 ## When testing changes
 

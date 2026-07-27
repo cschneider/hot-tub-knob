@@ -24,8 +24,10 @@ inlet/outlet temperature readings.*
 - Shows the knob's own battery level (top-right, next to the power symbol)
   as a small battery icon whose fill bar grows/shrinks and changes color
   (green/orange/red) with charge, rather than a bare percentage.
-- Turning the knob calls `climate.set_temperature` (debounced 400ms so rapid
-  turning doesn't spam Home Assistant).
+- Turning the knob calls `number.set_value` on a mode-aware target-temperature
+  entity (debounced 400ms so rapid turning doesn't spam Home Assistant) —
+  not `climate.set_temperature`, which the heat pump's HA `climate` entity
+  hardwires to the Auto-mode setpoint register regardless of actual mode.
 - Tapping the power symbol (top-right) toggles the heat pump between `auto`
   and `off` (`climate.set_hvac_mode`). Tapping anywhere else on the screen
   cycles Auto → Heating → Cooling (only while on) by writing directly to
@@ -84,8 +86,11 @@ Edit the `substitutions:` block at the top of `hot-tub-knob.yaml`:
 
 | Substitution | Meaning |
 |---|---|
-| `climate_entity` | Your heat pump's `climate.*` entity ID |
+| `climate_entity` | Your heat pump's `climate.*` entity ID. Only used for `current_temperature` (inlet temp) and `hvac_mode`/`climate.set_hvac_mode` (on/off) now — setpoint reads/writes go through `target_temp_entity` instead (see below) |
 | `water_temp_entity` | A dedicated physical water-temp `sensor.*` entity (separate from the climate entity's own `current_temperature` attribute) |
+| `water_outlet_entity` | Heat pump's own water outlet temp `sensor.*` entity, shown as a secondary reading alongside the inlet temp |
+| `heat_pump_operating_mode_entity` | Raw Modbus enum `sensor.*` for the selected Auto/Heating/Cooling submode (0/1/2) — the `climate` entity has no `hvac_action` to read this from |
+| `target_temp_entity` | A mode-aware `number.*` entity that reads/writes whichever setpoint register matches the current operating mode. **Use this, not `climate_entity`'s `temperature` attribute** — the heat pump keeps an independent setpoint per mode, and the `climate` entity is hardwired to the Auto-mode register only |
 | `screensaver` | How long the backlight stays on after the last touch/turn |
 | `setpoint_min` / `setpoint_max` | Allowed setpoint range, in actual °C |
 | `setpoint_min_units` / `setpoint_max_units` | Same range but ×2 (see "Half-degree steps" below) — keep these in sync manually if you change the range |
@@ -190,14 +195,27 @@ one — it's easy to toggle a different device's entry by mistake.
   (see the component's `loop()`), which fires `rotary_counter`'s own
   `on_value` - the same trigger a physical turn uses. Without a guard, every
   programmatic sync would also wake the backlight, reset `knob_quiet`, and
-  echo an unnecessary `climate.set_temperature` back to HA.
+  echo an unnecessary `number.set_value` call back to HA.
   `sync_knob_from_ha` sets `syncing_in_progress` around the `set_value`
   call specifically so `rotary_counter`'s `on_value` handler can tell the
   two cases apart and skip all of that for a sync.
 - **Debounced setpoint commits.** `commit_setpoint` uses `mode: restart`
   with a 400ms delay, so a burst of knob turns collapses into a single
-  `climate.set_temperature` call after you stop turning, rather than one
-  call per detent.
+  `number.set_value` call after you stop turning, rather than one call per
+  detent.
+- **Mode-aware setpoint writes via `target_temp_entity`, not
+  `climate.set_temperature`.** The heat pump keeps an independent target
+  setpoint register per operating mode (Auto/Heating/Cooling) instead of one
+  shared value. HA's native `modbus:` `climate:` platform can only bind
+  `target_temp_register` to one fixed address, so `climate.hot_tub_heat_pump`
+  is hardwired to the Auto register — calling `climate.set_temperature` while
+  the unit is actually in Heating or Cooling silently has no effect. Both
+  `commit_setpoint` (writes) and `ha_target_temp` (boot/resync reads) go
+  through `target_temp_entity` instead — a `number` template entity in
+  ha-stack's `template_hottub.yaml` that picks whichever register matches
+  the current mode. See `fairland-heatpump-modbus.md` and
+  `pool-heatpump-integration.md` in the `ha-stack` repo for the full
+  register-map writeup (fixed 2026-07-26).
 - **Gauge ring scale and target marker.** `temp_arc`'s range matches
   `setpoint_min`/`setpoint_max` (not some wider arbitrary scale), so the
   fill actually moves visibly instead of crawling across a much wider
@@ -234,13 +252,13 @@ one — it's easy to toggle a different device's entry by mistake.
   wired up.)
 - **Two touch zones on one touchscreen.** With no second button available,
   `on_touch`'s trigger variable `touch.x`/`touch.y` is used to split the
-  screen into two zones: the top-right corner (near the `pwr_dot` widget,
-  roughly `x > 260 && y < 100`) toggles on/off; everywhere else cycles the
+  screen into two zones: the top-right corner (near the `pwr_icon` widget,
+  roughly `x > 210 && y < 140`) toggles on/off; everywhere else cycles the
   operating mode. There's no HA-native entity to write the operating-mode
   register (it's a raw Modbus enum, see above), so `cycle_operating_mode`
-  calls the generic `modbus.write_register` service directly - the same
-  approach used for `climate.set_temperature`, just one level lower since
-  no purpose-built HA entity exists for this register.
+  calls the generic `modbus.write_register` service directly - one level
+  lower than the purpose-built entities used for setpoint/power, since none
+  exists for this register.
 
 ## Troubleshooting
 
