@@ -9,6 +9,13 @@ display that shows/controls a hot tub heat pump via Home Assistant. See
 `README.md` for full details — this file only covers things an agent needs
 to know before touching the code or hardware.
 
+## Git commit conventions
+
+**Never add a `Co-Authored-By: Claude`/`Generated with Claude Code` trailer to commits in this
+repo.** This is a public GitHub repo — commits should be attributed solely to the human author.
+(History was scrubbed of these trailers, and of an earlier work-email author identity, via
+`git filter-repo` + force-push on 2026-07-27; don't reintroduce either.)
+
 ## Key files
 
 - `hot-tub-knob.yaml` — the entire firmware config

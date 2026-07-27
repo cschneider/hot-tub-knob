@@ -1,0 +1,2 @@
+
+# No Co-Authored-By/Generated-with-Claude trailers in this repo (see CLAUDE.md).
